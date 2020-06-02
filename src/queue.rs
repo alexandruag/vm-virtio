@@ -14,7 +14,7 @@ use std::cmp::min;
 use std::fmt::{self, Display};
 use std::mem::size_of;
 use std::num::Wrapping;
-use std::sync::atomic::{fence, Ordering};
+use std::sync::atomic::{fence, AtomicU16, Ordering};
 
 use vm_memory::{
     Address, ByteValued, Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestUsize,
@@ -375,6 +375,12 @@ pub struct Queue<M: GuestAddressSpace> {
     next_avail: Wrapping<u16>,
     next_used: Wrapping<u16>,
 
+    /// VIRTIO_F_RING_EVENT_IDX negotiated
+    event_idx: bool,
+
+    /// The last used value when using EVENT_IDX
+    signalled_used: Option<Wrapping<u16>>,
+
     /// The queue size in elements the driver selected
     pub size: u16,
 
@@ -404,6 +410,8 @@ impl<M: GuestAddressSpace> Queue<M> {
             used_ring: GuestAddress(0),
             next_avail: Wrapping(0),
             next_used: Wrapping(0),
+            event_idx: false,
+            signalled_used: None,
         }
     }
 
@@ -422,6 +430,13 @@ impl<M: GuestAddressSpace> Queue<M> {
     pub fn reset(&mut self) {
         self.ready = false;
         self.size = self.max_size;
+    }
+
+    /// Enable/disable the VIRTIO_F_RING_EVENT_IDX feature.
+    pub fn set_event_idx(&mut self, enabled: bool) {
+        /* Also reset the last signalled event */
+        self.signalled_used = None;
+        self.event_idx = enabled;
     }
 
     /// Check if the virtio queue configuration is valid.
@@ -517,13 +532,13 @@ impl<M: GuestAddressSpace> Queue<M> {
     }
 
     /// Puts an available descriptor head into the used ring for use by the guest.
-    pub fn add_used(&mut self, desc_index: u16, len: u32) {
+    pub fn add_used(&mut self, desc_index: u16, len: u32) -> Option<u16> {
         if desc_index >= self.actual_size() {
             error!(
                 "attempted to add out of bounds descriptor to used ring: {}",
                 desc_index
             );
-            return;
+            return None;
         }
 
         let snapshot = self.mem.memory();
@@ -548,6 +563,78 @@ impl<M: GuestAddressSpace> Queue<M> {
         snapshot
             .write_obj(self.next_used.0 as u16, used_ring.unchecked_add(2))
             .unwrap();
+
+        Some(self.next_used.0)
+    }
+
+    /// Update avail_event on the used ring with the last index in the avail ring.
+    pub fn update_avail_event(&mut self) {
+        // Safe because we have validated the queue and access guest memory through GuestMemory
+        // interfaces.
+        // And the `used_index` is a two-byte naturally aligned field, so it won't cross the region
+        // boundary and get_slice() shouldn't fail.
+        let mem = self.mem.memory();
+        let index_addr = self.avail_ring.unchecked_add(2);
+        match mem.get_slice(index_addr, size_of::<u16>()).map(|s| {
+            s.get_atomic_ref::<AtomicU16>(0)
+                .unwrap()
+                .load(Ordering::Relaxed)
+        }) {
+            Ok(index) => {
+                let offset = (4 + self.actual_size() * 8) as u64;
+                let avail_event_addr = self.used_ring.unchecked_add(offset);
+                if let Ok(avail_event_slice) = mem.get_slice(avail_event_addr, size_of::<u16>()) {
+                    // This fence ensures the guest sees the value we've just written.
+                    avail_event_slice
+                        .get_atomic_ref::<AtomicU16>(0)
+                        .unwrap()
+                        .store(index, Ordering::Relaxed);
+                } else {
+                    warn!("Can't update avail_event");
+                }
+            }
+            Err(e) => warn!("Invalid offset, {}", e),
+        }
+    }
+
+    /// Return the value present in the used_event field of the avail ring.
+    fn get_used_event(&self) -> Option<Wrapping<u16>> {
+        // Safe because we have validated the queue and access guest memory through GuestMemory
+        // interfaces.
+        // And the `used_index` is a two-byte naturally aligned field, so it won't cross the region
+        // boundary and get_slice() shouldn't fail.
+        let mem = self.mem.memory();
+        let used_event_addr = self
+            .avail_ring
+            .unchecked_add((4 + self.actual_size() * 2) as u64);
+        // This fence ensures we're seeing the latest update from the guest.
+        mem.get_slice(used_event_addr, size_of::<u16>())
+            .map(|s| {
+                Wrapping(
+                    s.get_atomic_ref::<AtomicU16>(0)
+                        .unwrap()
+                        .load(Ordering::Relaxed),
+                )
+            })
+            .ok()
+    }
+
+    /// Check whether a notification to the guest is needed.
+    pub fn needs_notification(&mut self, used_idx: Wrapping<u16>) -> bool {
+        let mut notify = true;
+
+        // The VRING_AVAIL_F_NO_INTERRUPT flag isn't supported yet.
+        if self.event_idx {
+            if let Some(old_idx) = self.signalled_used.replace(used_idx) {
+                if let Some(used_event) = self.get_used_event() {
+                    if (used_idx - used_event - Wrapping(1u16)) >= (used_idx - old_idx) {
+                        notify = false;
+                    }
+                }
+            }
+        }
+
+        notify
     }
 
     /// Goes back one position in the available descriptor chain offered by the driver.
@@ -1136,11 +1223,11 @@ pub(crate) mod tests {
         assert_eq!(vq.used.idx().load(), 0);
 
         //index too large
-        q.add_used(16, 0x1000);
+        assert!(q.add_used(16, 0x1000).is_none());
         assert_eq!(vq.used.idx().load(), 0);
 
         //should be ok
-        q.add_used(1, 0x1000);
+        assert_eq!(q.add_used(1, 0x1000).unwrap(), 1);
         assert_eq!(vq.used.idx().load(), 1);
         let x = vq.used.ring(0).load();
         assert_eq!(x.id, 1);
@@ -1158,5 +1245,41 @@ pub(crate) mod tests {
         q.reset();
         assert_eq!(q.size, 16);
         assert_eq!(q.ready, false);
+    }
+
+    #[test]
+    fn test_needs_notification() {
+        let m = &GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let vq = VirtQueue::new(GuestAddress(0), m, 16);
+        let mut q = vq.create_queue(&m);
+        let avail_addr = vq.avail_start();
+
+        // It should always return true when EVENT_IDX isn't enabled.
+        assert_eq!(q.needs_notification(Wrapping(1)), true);
+        assert_eq!(q.needs_notification(Wrapping(2)), true);
+        assert_eq!(q.needs_notification(Wrapping(3)), true);
+        assert_eq!(q.needs_notification(Wrapping(4)), true);
+        assert_eq!(q.needs_notification(Wrapping(5)), true);
+
+        m.write_obj::<u16>(4, avail_addr.unchecked_add(4 + 16 * 2))
+            .unwrap();
+        q.set_event_idx(true);
+        assert_eq!(q.needs_notification(Wrapping(1)), true);
+        assert_eq!(q.needs_notification(Wrapping(2)), false);
+        assert_eq!(q.needs_notification(Wrapping(3)), false);
+        assert_eq!(q.needs_notification(Wrapping(4)), false);
+        assert_eq!(q.needs_notification(Wrapping(5)), true);
+        assert_eq!(q.needs_notification(Wrapping(6)), false);
+        assert_eq!(q.needs_notification(Wrapping(7)), false);
+
+        m.write_obj::<u16>(8, avail_addr.unchecked_add(4 + 16 * 2))
+            .unwrap();
+        assert_eq!(q.needs_notification(Wrapping(11)), true);
+        assert_eq!(q.needs_notification(Wrapping(12)), false);
+
+        m.write_obj::<u16>(15, avail_addr.unchecked_add(4 + 16 * 2))
+            .unwrap();
+        assert_eq!(q.needs_notification(Wrapping(0)), true);
+        assert_eq!(q.needs_notification(Wrapping(14)), false);
     }
 }
