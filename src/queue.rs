@@ -130,6 +130,7 @@ pub struct DescriptorChain<M: GuestAddressSpace> {
 
     /// The current descriptor
     desc: Descriptor,
+    curr_indirect: Option<Box<DescriptorChain<M>>>,
 }
 
 impl<M: GuestAddressSpace> DescriptorChain<M> {
@@ -158,6 +159,7 @@ impl<M: GuestAddressSpace> DescriptorChain<M> {
             queue_size,
             ttl,
             desc,
+            curr_indirect: None,
         };
 
         if chain.is_valid() {
@@ -212,6 +214,7 @@ impl<M: GuestAddressSpace> DescriptorChain<M> {
                 flags: desc.flags,
                 next: desc.next,
             },
+            curr_indirect: None,
         };
 
         if !chain.is_valid() {
@@ -266,6 +269,16 @@ impl<M: GuestAddressSpace> Iterator for DescriptorChain<M> {
     fn next(&mut self) -> Option<Self::Item> {
         if self.ttl == 0 {
             return None;
+        }
+
+        if let Some(ref mut indirect) = self.curr_indirect {
+            return indirect.next();
+        }
+        if self.is_indirect() {
+            let mut indirect_chain = self.new_from_indirect().ok()?;
+            let first = indirect_chain.next();
+            self.curr_indirect = Some(Box::new(indirect_chain));
+            return first;
         }
 
         let curr = self.desc;
@@ -883,7 +896,7 @@ pub(crate) mod tests {
         let desc = vq.dtable(0);
         desc.set(0x1000, 0x1000, VIRTQ_DESC_F_INDIRECT, 0);
 
-        let c: DescriptorChain<&GuestMemoryMmap> =
+        let mut c: DescriptorChain<&GuestMemoryMmap> =
             DescriptorChain::checked_new(m, vq.start(), 16, 0).unwrap();
         assert!(c.is_indirect());
 
@@ -900,9 +913,8 @@ pub(crate) mod tests {
         }
 
         // try to iterate through the indirect table descriptors
-        let mut i = c.new_from_indirect().unwrap();
         for j in 0..4 {
-            let desc = i.next().unwrap();
+            let desc = c.next().unwrap();
             assert_eq!(desc.flags(), VIRTQ_DESC_F_NEXT);
             assert_eq!(desc.next, j + 1);
         }
