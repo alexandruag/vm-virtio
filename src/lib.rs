@@ -14,7 +14,8 @@ extern crate log;
 extern crate vm_memory;
 extern crate vmm_sys_util;
 
-mod device;
+mod device
+pub mod proto;
 mod queue;
 
 pub use self::device::*;
