@@ -5,7 +5,7 @@
 // found in the LICENSE-BSD-3-Clause file.
 //
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
-#![deny(missing_docs)]
+// #![deny(missing_docs)]
 
 //! Implements virtio devices, queues, and transport mechanisms.
 extern crate epoll;
@@ -14,7 +14,7 @@ extern crate log;
 extern crate vm_memory;
 extern crate vmm_sys_util;
 
-mod device
+mod device;
 pub mod proto;
 mod queue;
 
