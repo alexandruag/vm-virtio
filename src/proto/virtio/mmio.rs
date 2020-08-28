@@ -6,6 +6,11 @@ use vm_memory::{ByteValued, GuestAddress};
 use super::device::{device_status, VirtioDevice};
 use super::queue::Queue;
 
+/// Interrupt flags (re: interrupt status & acknowledge registers).
+/// See linux/virtio_mmio.h.
+pub const VIRTIO_MMIO_INT_VRING: u32 = 0x01;
+pub const VIRTIO_MMIO_INT_CONFIG: u32 = 0x02;
+
 // required by the virtio mmio device register layout at offset 0 from base
 const MMIO_MAGIC_VALUE: u32 = 0x7472_6976;
 
@@ -15,7 +20,7 @@ const MMIO_VERSION: u32 = 2;
 // TODO: crosvm uses 0 here(?), but IIRC virtio specified some other vendor id that should be used
 const VENDOR_ID: u32 = 0;
 
-trait VirtioMmioDevice: VirtioDevice {
+pub trait VirtioMmioDevice: VirtioDevice {
     // TODO: refactor? replace? move?
     fn update_queue_field<F: FnOnce(&mut Queue)>(&mut self, f: F) {
         if self.check_device_status(

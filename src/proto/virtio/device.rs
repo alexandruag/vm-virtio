@@ -26,6 +26,9 @@ pub mod device_status {
     pub const DRIVER_OK: u8 = 4;
 }
 
+pub const TYPE_NET: u32 = 1;
+pub const TYPE_BLOCK: u32 = 2;
+
 pub trait VirtioDevice {
     /// The virtio device type.
     fn device_type(&self) -> u32;
@@ -99,7 +102,7 @@ pub struct VirtioState {
 }
 
 impl VirtioState {
-    fn queues(&self) -> &[Queue] {
+    pub fn queues(&self) -> &[Queue] {
         self.queues.as_slice()
     }
 }
@@ -108,10 +111,8 @@ pub trait WithVirtioState {
     fn device_type(&self) -> u32;
     fn virtio_state(&self) -> &VirtioState;
     fn virtio_state_mut(&mut self) -> &mut VirtioState;
-    fn activate(&mut self);
-    // fn reset(&mut self);
 
-    // lul
+    // Hmm AddressSpace at some point?
     fn mem(&self) -> &GuestMemoryMmap;
 
     fn are_queues_valid(&self) -> bool {
@@ -120,6 +121,9 @@ pub trait WithVirtioState {
             .iter()
             .all(|q| q.is_valid(&self.mem()))
     }
+
+    fn activate(&mut self);
+    // fn reset(&mut self);
 }
 
 impl<T: WithVirtioState> VirtioDevice for T {
@@ -239,6 +243,8 @@ impl<T: WithVirtioState> VirtioDevice for T {
             }
             // TODO: ?!?!?!?
             _ if status == 0 => {
+                // ?!?!?
+                unreachable!()
                 // if self.virtio_state().device_activated {
                 //     let mut device_status = self.device_status;
                 //     let reset_result = self.locked_device().reset();

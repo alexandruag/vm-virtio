@@ -1,5 +1,5 @@
 pub mod example;
-//pub mod handler;
+pub mod handler;
 pub mod request;
 
 use std::io::{Read, Seek, Write};

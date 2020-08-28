@@ -12,6 +12,9 @@ const VIRTIO_BLK_T_OUT: u32 = 1;
 const VIRTIO_BLK_T_FLUSH: u32 = 4;
 const VIRTIO_BLK_T_GET_ID: u32 = 8;
 
+const VIRTIO_BLK_S_IOERR: u32 = 1;
+const VIRTIO_BLK_S_UNSUPP: u32 = 2;
+
 #[derive(Debug)]
 pub enum ExecuteError {
     BadRequest(Error),
@@ -20,6 +23,19 @@ pub enum ExecuteError {
     Seek(io::Error),
     Write(GuestMemoryError),
     Unsupported(u32),
+}
+
+impl ExecuteError {
+    pub fn status(&self) -> u32 {
+        match *self {
+            ExecuteError::BadRequest(_) => VIRTIO_BLK_S_IOERR,
+            ExecuteError::Flush(_) => VIRTIO_BLK_S_IOERR,
+            ExecuteError::Read(_) => VIRTIO_BLK_S_IOERR,
+            ExecuteError::Seek(_) => VIRTIO_BLK_S_IOERR,
+            ExecuteError::Write(_) => VIRTIO_BLK_S_IOERR,
+            ExecuteError::Unsupported(_) => VIRTIO_BLK_S_UNSUPP,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
