@@ -14,11 +14,13 @@ use std::cmp::min;
 use std::fmt::{self, Display};
 use std::mem::size_of;
 use std::num::Wrapping;
+use std::result::Result;
 use std::sync::atomic::{fence, AtomicU16, Ordering};
 
+use std::ops::Deref;
 use vm_memory::{
-    Address, ByteValued, Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestUsize,
-    VolatileMemory,
+    Address, ByteValued, Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryError,
+    GuestUsize, VolatileMemory,
 };
 
 pub(super) const VIRTQ_DESC_F_NEXT: u16 = 0x1;
@@ -54,11 +56,13 @@ const VIRTQ_DESCRIPTOR_SIZE: usize = 16;
 #[derive(Debug)]
 pub enum Error {
     /// Failed to access guest memory.
-    GuestMemoryError,
+    GuestMemory(GuestMemoryError),
     /// Invalid indirect descriptor.
     InvalidIndirectDescriptor,
     /// Invalid descriptor chain.
     InvalidChain,
+    ///
+    Overflow,
 }
 
 impl Display for Error {
@@ -66,9 +70,10 @@ impl Display for Error {
         use self::Error::*;
 
         match self {
-            GuestMemoryError => write!(f, "error accessing guest memory"),
+            GuestMemory(_) => write!(f, "error accessing guest memory"),
             InvalidChain => write!(f, "invalid descriptor chain"),
             InvalidIndirectDescriptor => write!(f, "invalid indirect descriptor"),
+            Overflow => write!(f, "overflow while computing address"),
         }
     }
 }
@@ -121,11 +126,49 @@ impl Descriptor {
 
 unsafe impl ByteValued for Descriptor {}
 
+///
+#[derive(Clone, Copy, Debug)]
+pub struct DescriptorTable {
+    addr: GuestAddress,
+    len: u16,
+}
+
+impl DescriptorTable {
+    ///
+    pub fn new(addr: GuestAddress, len: u16) -> Self {
+        DescriptorTable { addr, len }
+    }
+
+    ///
+    pub fn read_descriptor<M: GuestMemory>(
+        &self,
+        mem: &M,
+        index: u16,
+    ) -> Result<Descriptor, Error> {
+        if index >= self.len {
+            return Err(Error::InvalidChain);
+        }
+
+        let desc_size = size_of::<Descriptor>();
+
+        // TODO: The checked_add beloq is unnecessary if we properly validated the descriptor
+        // table beforehand. Leaving this here until investigating more (or maybe we should keep
+        // using it as an extra precaution; some performance tests will tell more as well).
+
+        // The `as` below is ok to use here as the size of a `Descriptor` struct always
+        // fits within a `u64`.
+        let desc_addr = self
+            .addr
+            .checked_add(u64::from(index) * desc_size as u64)
+            .ok_or(Error::Overflow)?;
+        mem.read_obj(desc_addr).map_err(Error::GuestMemory)
+    }
+}
+
 /// A virtio descriptor chain.
 pub struct DescriptorChain<M: GuestAddressSpace> {
     mem: M::T,
-    desc_table: GuestAddress,
-    queue_size: u16,
+    desc_table: DescriptorTable,
     ttl: u16, // used to prevent infinite chain cycles
 
     /// The current descriptor
@@ -134,29 +177,15 @@ pub struct DescriptorChain<M: GuestAddressSpace> {
 }
 
 impl<M: GuestAddressSpace> DescriptorChain<M> {
-    fn read_new(
-        mem: M::T,
-        desc_table: GuestAddress,
-        queue_size: u16,
-        ttl: u16,
-        index: u16,
-    ) -> Option<Self> {
-        if index >= queue_size {
+    fn read_new(mem: M::T, desc_table: DescriptorTable, ttl: u16, index: u16) -> Option<Self> {
+        if index >= desc_table.len {
             return None;
         }
 
-        let desc_size = size_of::<Descriptor>();
-        let desc_addr = match desc_table.checked_add(desc_size as u64 * index as u64) {
-            Some(a) => a,
-            None => return None,
-        };
-        // The descriptor is 16 bytes and aligned on on 16-bytes, so it won't cross guest memory boundary.
-        let slice = mem.get_slice(desc_addr, desc_size).ok()?;
-        let desc = slice.get_ref(0).ok()?.load();
+        let desc = desc_table.read_descriptor(mem.deref(), index).ok()?;
         let chain = DescriptorChain {
             mem,
             desc_table,
-            queue_size,
             ttl,
             desc,
             curr_indirect: None,
@@ -170,13 +199,8 @@ impl<M: GuestAddressSpace> DescriptorChain<M> {
     }
 
     /// Create a new DescriptorChain instance.
-    fn checked_new(
-        mem: M::T,
-        dtable_addr: GuestAddress,
-        queue_size: u16,
-        index: u16,
-    ) -> Option<Self> {
-        Self::read_new(mem, dtable_addr, queue_size, queue_size, index)
+    fn checked_new(mem: M::T, desc_table: DescriptorTable, index: u16) -> Option<Self> {
+        Self::read_new(mem, desc_table, desc_table.len, index)
     }
 
     /// Create a `DescriptorChain` from the indirect target descriptor table.
@@ -201,12 +225,14 @@ impl<M: GuestAddressSpace> DescriptorChain<M> {
             .mem
             .get_slice(GuestAddress(desc_head), size_of::<Descriptor>())
             .map(|s| s.get_ref(0).unwrap().load())
-            .map_err(|_| Error::GuestMemoryError)?;
+            .map_err(Error::GuestMemory)?;
 
         let chain = DescriptorChain {
             mem: self.mem.clone(),
-            desc_table: GuestAddress(desc_head),
-            queue_size: (desc_len / VIRTQ_DESCRIPTOR_SIZE) as u16,
+            desc_table: DescriptorTable::new(
+                GuestAddress(desc_head),
+                (desc_len / VIRTQ_DESCRIPTOR_SIZE) as u16,
+            ),
             ttl: (desc_len / VIRTQ_DESCRIPTOR_SIZE) as u16,
             desc: Descriptor {
                 addr: desc.addr,
@@ -227,7 +253,7 @@ impl<M: GuestAddressSpace> DescriptorChain<M> {
     fn is_valid(&self) -> bool {
         self.mem
             .checked_offset(self.desc.addr(), self.desc.len as usize)
-            .filter(|_| !self.has_next() || self.desc.next < self.queue_size)
+            .filter(|_| !self.has_next() || self.desc.next < self.desc_table.len)
             .is_some()
     }
 
@@ -286,10 +312,13 @@ impl<M: GuestAddressSpace> Iterator for DescriptorChain<M> {
             self.ttl = 0
         } else {
             let index = self.desc.next;
-            let desc_table_size = size_of::<Descriptor>() * self.queue_size as usize;
-            let slice = self.mem.get_slice(self.desc_table, desc_table_size).ok()?;
+            let desc_table_size = size_of::<Descriptor>() * self.desc_table.len as usize;
+            let slice = self
+                .mem
+                .get_slice(self.desc_table.addr, desc_table_size)
+                .ok()?;
             self.desc = slice
-                .get_array_ref(0, self.queue_size as usize)
+                .get_array_ref(0, self.desc_table.len as usize)
                 .ok()?
                 .load(index as usize);
             self.ttl -= 1;
@@ -347,8 +376,7 @@ impl<'b, M: GuestAddressSpace> Iterator for AvailIter<'b, M> {
 
         let desc = DescriptorChain::checked_new(
             self.mem.clone(),
-            self.desc_table,
-            self.queue_size,
+            DescriptorTable::new(self.desc_table, self.queue_size),
             desc_index,
         );
         if desc.is_some() {
@@ -884,20 +912,29 @@ pub(crate) mod tests {
         assert!(vq.end().0 < 0x1000);
 
         // index >= queue_size
-        assert!(DescriptorChain::<&GuestMemoryMmap>::checked_new(m, vq.start(), 16, 16).is_none());
+        assert!(DescriptorChain::<&GuestMemoryMmap>::checked_new(
+            m,
+            DescriptorTable::new(vq.start(), 16),
+            16
+        )
+        .is_none());
 
         // desc_table address is way off
         assert!(DescriptorChain::<&GuestMemoryMmap>::checked_new(
             m,
-            GuestAddress(0x00ff_ffff_ffff),
-            16,
+            DescriptorTable::new(GuestAddress(0x00ff_ffff_ffff), 16),
             0
         )
         .is_none());
 
         // the addr field of the descriptor is way off
         vq.dtable(0).addr().store(0x0fff_ffff_ffff);
-        assert!(DescriptorChain::<&GuestMemoryMmap>::checked_new(m, vq.start(), 16, 0).is_none());
+        assert!(DescriptorChain::<&GuestMemoryMmap>::checked_new(
+            m,
+            DescriptorTable::new(vq.start(), 16),
+            0
+        )
+        .is_none());
 
         // let's create some invalid chains
 
@@ -906,9 +943,12 @@ pub(crate) mod tests {
             vq.dtable(0).addr().store(0x1000);
             // ...but the length is too large
             vq.dtable(0).len().store(0xffff_ffff);
-            assert!(
-                DescriptorChain::<&GuestMemoryMmap>::checked_new(m, vq.start(), 16, 0).is_none()
-            );
+            assert!(DescriptorChain::<&GuestMemoryMmap>::checked_new(
+                m,
+                DescriptorTable::new(vq.start(), 16),
+                0
+            )
+            .is_none());
         }
 
         {
@@ -918,9 +958,12 @@ pub(crate) mod tests {
             //..but the the index of the next descriptor is too large
             vq.dtable(0).next().store(16);
 
-            assert!(
-                DescriptorChain::<&GuestMemoryMmap>::checked_new(m, vq.start(), 16, 0).is_none()
-            );
+            assert!(DescriptorChain::<&GuestMemoryMmap>::checked_new(
+                m,
+                DescriptorTable::new(vq.start(), 16),
+                0
+            )
+            .is_none());
         }
 
         // finally, let's test an ok chain
@@ -929,16 +972,20 @@ pub(crate) mod tests {
             vq.dtable(0).next().store(1);
             vq.dtable(1).set(0x2000, 0x1000, 0, 0);
 
-            let mut c =
-                DescriptorChain::<&GuestMemoryMmap>::checked_new(m, vq.start(), 16, 0).unwrap();
+            let mut c = DescriptorChain::<&GuestMemoryMmap>::checked_new(
+                m,
+                DescriptorTable::new(vq.start(), 16),
+                0,
+            )
+            .unwrap();
 
             assert_eq!(
                 c.memory() as *const GuestMemoryMmap,
                 m as *const GuestMemoryMmap
             );
-            assert_eq!(c.desc_table, vq.dtable_start());
-            assert_eq!(c.queue_size, 16);
-            assert_eq!(c.ttl, c.queue_size);
+            assert_eq!(c.desc_table.addr, vq.dtable_start());
+            assert_eq!(c.desc_table.len, 16);
+            assert_eq!(c.ttl, c.desc_table.len);
             let desc = c.next().unwrap();
             assert_eq!(desc.addr(), GuestAddress(0x1000));
             assert_eq!(desc.len(), 0x1000);
@@ -959,9 +1006,12 @@ pub(crate) mod tests {
         .unwrap();
 
         // The whole descriptor table crosses guest memory boundary, it should ok.
-        assert!(
-            DescriptorChain::<&GuestMemoryMmap>::checked_new(m, GuestAddress(0), 512, 1).is_some()
-        );
+        assert!(DescriptorChain::<&GuestMemoryMmap>::checked_new(
+            m,
+            DescriptorTable::new(GuestAddress(0), 512),
+            1
+        )
+        .is_some());
     }
 
     #[test]
@@ -974,7 +1024,7 @@ pub(crate) mod tests {
         desc.set(0x1000, 0x1000, VIRTQ_DESC_F_INDIRECT, 0);
 
         let mut c: DescriptorChain<&GuestMemoryMmap> =
-            DescriptorChain::checked_new(m, vq.start(), 16, 0).unwrap();
+            DescriptorChain::checked_new(m, DescriptorTable::new(vq.start, 16), 0).unwrap();
         assert!(c.is_indirect());
 
         let region = m.find_region(GuestAddress(0)).unwrap();
@@ -1008,7 +1058,7 @@ pub(crate) mod tests {
             desc.set(0x1001, 0x1000, VIRTQ_DESC_F_INDIRECT, 0);
 
             let c: DescriptorChain<&GuestMemoryMmap> =
-                DescriptorChain::checked_new(m, vq.start(), 16, 0).unwrap();
+                DescriptorChain::checked_new(m, DescriptorTable::new(vq.start, 16), 0).unwrap();
             assert!(c.is_indirect());
 
             assert!(c.new_from_indirect().is_err());
@@ -1023,7 +1073,7 @@ pub(crate) mod tests {
             desc.set(0x1000, 0x1001, VIRTQ_DESC_F_INDIRECT, 0);
 
             let c: DescriptorChain<&GuestMemoryMmap> =
-                DescriptorChain::checked_new(m, vq.start(), 16, 0).unwrap();
+                DescriptorChain::checked_new(m, DescriptorTable::new(vq.start, 16), 0).unwrap();
             assert!(c.is_indirect());
 
             assert!(c.new_from_indirect().is_err());
