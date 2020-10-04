@@ -8,9 +8,13 @@
 
 //! A module that offers building blocks for virtio devices.
 
+mod mmio;
+
 use vm_memory::GuestAddressSpace;
 
 use crate::Queue;
+
+pub use mmio::VirtioMmioDevice;
 
 /// When the driver initializes the device, it lets the device know about the completed stages
 /// using the Device Status field.
