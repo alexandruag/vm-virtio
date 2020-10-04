@@ -14,10 +14,10 @@ extern crate log;
 extern crate vm_memory;
 extern crate vmm_sys_util;
 
-mod device;
+mod devices;
 mod queue;
 
-pub use self::device::*;
+pub use self::devices::*;
 pub use self::queue::*;
 
 #[derive(Debug)]
