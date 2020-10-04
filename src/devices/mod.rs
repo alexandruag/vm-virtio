@@ -8,6 +8,7 @@
 
 //! A module that offers building blocks for virtio devices.
 
+mod example_device;
 mod mmio;
 mod virtio_config;
 
