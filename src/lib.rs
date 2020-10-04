@@ -14,21 +14,7 @@ extern crate log;
 extern crate vm_memory;
 extern crate vmm_sys_util;
 
-mod device;
+pub mod device;
 mod queue;
 
-pub use self::device::*;
 pub use self::queue::*;
-
-#[derive(Debug)]
-/// Virtio device activation errors.
-pub enum ActivateError {
-    /// Virtio device epoll control interface error.
-    EpollCtl(std::io::Error),
-
-    /// Could not activate the virtio device.
-    BadActivate,
-}
-
-/// Virtio device activation result type.
-pub type ActivateResult = std::result::Result<(), ActivateError>;
