@@ -680,16 +680,10 @@ impl<M: GuestAddressSpace> Queue<M> {
 
         // The VRING_AVAIL_F_NO_INTERRUPT flag isn't supported yet.
         if self.event_idx_enabled {
-            if let Some(old_idx) = self.signalled_used.replace(used_idx) {
-                let used_event = self.used_event(Ordering::Relaxed)?;
-                // This check looks at `used_idx`, `used_event`, and `old_idx` as if they are on
-                // an axis that wraps around. If `used_idx - used_used - Wrapping(1)` is greater
-                // than or equal to the difference between `used_idx` and `old_idx`, then
-                // `old_idx` is closer to `used_idx` than `used_event` (and thus more recent), so
-                // we don't need to elicit another notification.
-                if (used_idx - used_event - Wrapping(1u16)) >= (used_idx - old_idx) {
-                    return Ok(false);
-                }
+            let used_event = self.used_event(Ordering::Relaxed)?;
+
+            if used_idx - Wrapping(1) != used_event {
+                return Ok(false)
             }
         }
 
