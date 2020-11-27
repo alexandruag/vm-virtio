@@ -19,10 +19,9 @@ pub mod block;
 mod device;
 mod queue;
 
-pub use self::block::{
-    request::Request as BlockRequest, request::RequestType as BlockRequestType,
-    stdio_executor::StdIoBackend,
-};
+#[cfg(feature = "backend-stdio")]
+pub use self::block::stdio_executor::StdIoBackend;
+pub use self::block::{request::Request as BlockRequest, request::RequestType as BlockRequestType};
 pub use self::device::*;
 pub use self::queue::*;
 
