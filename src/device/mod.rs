@@ -235,3 +235,55 @@ pub trait WithDriverSelect<M: GuestAddressSpace>: VirtioDevice<M> {
     /// Set the index of the currently selected page for driver features acknowledgement.
     fn set_driver_features_select(&mut self, value: u32);
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::device::status::*;
+    use crate::device::virtio_config::tests::Dummy;
+
+    use super::*;
+
+    #[test]
+    fn test_ack_device_status() {
+        // We're using the `Dummy` struct that gets a `VirtioDevice` implementation
+        // automatically via the logic in `virtio_config`. The auto implementation does
+        // not override the default `ack_device_status` implementation.
+
+        let mut d = Dummy::new(0, 0, Vec::new());
+
+        // TODO: This is just a quick test for the happy path mostly. Find a better way to test
+        // things for the various combinations which are possible.
+
+        assert_eq!(d.cfg.device_status, 0);
+
+        // Doesn't do anything; `ACKNOWLEDGE` has to be set first.
+        d.ack_device_status(DRIVER);
+        assert_eq!(d.cfg.device_status, 0);
+
+        let mut status = ACKNOWLEDGE;
+
+        d.ack_device_status(status);
+        assert_eq!(d.cfg.device_status, status);
+
+        status |= DRIVER;
+        d.ack_device_status(status);
+        assert_eq!(d.cfg.device_status, status);
+
+        status |= FEATURES_OK;
+        d.ack_device_status(status);
+        assert_eq!(d.cfg.device_status, status);
+
+        assert_eq!(d.activate_count, 0);
+        status |= DRIVER_OK;
+        d.ack_device_status(status);
+        assert_eq!(d.cfg.device_status, status);
+        assert_eq!(d.activate_count, 1);
+
+        d.ack_device_status(FAILED);
+        assert_ne!(d.cfg.device_status & FAILED, 0);
+
+        assert_eq!(d.reset_count, 0);
+        d.ack_device_status(RESET);
+        assert_eq!(d.reset_count, 1);
+    }
+}
