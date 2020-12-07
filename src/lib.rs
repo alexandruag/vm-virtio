@@ -16,7 +16,7 @@ extern crate vmm_sys_util;
 
 /// Provides abstractions for virtio block device.
 pub mod block;
-mod device;
+pub mod device;
 mod queue;
 
 #[cfg(feature = "backend-stdio")]
@@ -24,16 +24,3 @@ pub use self::block::stdio_executor::StdIoBackend;
 pub use self::block::{request::Request as BlockRequest, request::RequestType as BlockRequestType};
 pub use self::device::*;
 pub use self::queue::*;
-
-#[derive(Debug)]
-/// Virtio device activation errors.
-pub enum ActivateError {
-    /// Virtio device epoll control interface error.
-    EpollCtl(std::io::Error),
-
-    /// Could not activate the virtio device.
-    BadActivate,
-}
-
-/// Virtio device activation result type.
-pub type ActivateResult = std::result::Result<(), ActivateError>;
