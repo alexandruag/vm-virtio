@@ -28,6 +28,8 @@ pub enum Error {
     InvalidChain,
     /// Invalid descriptor index.
     InvalidDescriptorIndex,
+    /// Invalid read-only descriptor encountered.
+    InvalidReadOnlyDescriptor,
     /// Volatile memory related error.
     VolatileMemoryError(VolatileMemoryError),
     /// Descriptor chain overflow.
@@ -48,6 +50,7 @@ impl Display for Error {
             InvalidIndirectDescriptor => write!(f, "invalid indirect descriptor"),
             InvalidIndirectDescriptorTable => write!(f, "invalid indirect descriptor table"),
             InvalidDescriptorIndex => write!(f, "invalid descriptor index"),
+            InvalidReadOnlyDescriptor => write!(f, "invalid read-only descriptor"),
             VolatileMemoryError(e) => write!(f, "volatile memory error: {}", e),
             DescriptorChainOverflow => write!(
                 f,
