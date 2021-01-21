@@ -368,7 +368,7 @@ impl VirtqUsedElem {
 unsafe impl ByteValued for VirtqUsedElem {}
 
 /// A virtio queue's parameters.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug, PartialEq)]
 pub struct QueueConfig {
     /// The maximal size in elements offered by the device
     pub max_size: u16,
@@ -380,10 +380,10 @@ pub struct QueueConfig {
     pub next_used: Wrapping<u16>,
 
     /// VIRTIO_F_RING_EVENT_IDX negotiated
-    event_idx_enabled: bool,
+    pub event_idx_enabled: bool,
 
     /// The last used value when using EVENT_IDX
-    signalled_used: Option<Wrapping<u16>>,
+    pub signalled_used: Option<Wrapping<u16>>,
 
     /// The queue size in elements the driver selected
     pub size: u16,
@@ -752,10 +752,41 @@ impl<M: GuestAddressSpace, C: BorrowMut<QueueConfig>> Queue<M, C> {
     /// Pop and return the next available descriptor chain. Returns `None` if no more
     /// descriptor chains are available.
     pub fn pop_descriptor_chain(&mut self) -> Option<DescriptorChain<M>> {
-        // The current implementation merely creates a new `AvailIter` and calls `next` once.
-        // TODO: Improve this if there's a performance impact or we get rid of `AvailIter`
-        // altogether.
-        self.iter().map(|mut i| i.next()).unwrap_or(None)
+        let avail_idx = self.avail_idx(Ordering::Acquire).ok()?;
+
+        if self.next_avail() == avail_idx.0 {
+            return None;
+        }
+
+        let queue_size = self.actual_size();
+
+        // This computation cannot overflow because all the values involved are actually
+        // `u16`s cast to `u64`.
+        let offset = VIRTQ_AVAIL_RING_HEADER_SIZE
+            + (self.next_avail() % queue_size) as u64 * VIRTQ_AVAIL_ELEMENT_SIZE;
+
+        // The logic in `Queue::is_valid` ensures it's ok to use `unchecked_add` as long
+        // as the index is within bounds. We do not currently enforce that a queue is only used
+        // after checking `is_valid`, but rather expect the device implementations to do so
+        // before activation. The standard also forbids drivers to change queue parameters
+        // while the device is "running". A warp-around cannot lead to unsafe memory accesses
+        // because the memory model performs its own validations.
+        let addr = self.config().avail_ring.unchecked_add(offset);
+        let head_index: u16 = self
+            .mem
+            .memory()
+            .read_obj(addr)
+            .map_err(|_| error!("Failed to read from memory {:x}", addr.raw_value()))
+            .ok()?;
+
+        self.config_mut().next_avail += Wrapping(1);
+
+        Some(DescriptorChain::new(
+            self.mem.memory().clone(),
+            self.config().desc_table,
+            queue_size,
+            head_index,
+        ))
     }
 
     /// Goes back one position in the available descriptor chain offered by the driver.
