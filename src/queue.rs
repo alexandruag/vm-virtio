@@ -83,17 +83,17 @@ impl std::error::Error for Error {}
 #[derive(Default, Clone, Copy)]
 pub struct Descriptor {
     /// Guest physical address of device specific data
-    addr: u64,
+    pub addr: u64,
 
     /// Length of device specific data
-    len: u32,
+    pub len: u32,
 
     /// Includes next, write, and indirect bits
-    flags: u16,
+    pub flags: u16,
 
     /// Index into the descriptor table of the next descriptor if flags has
     /// the next bit set
-    next: u16,
+    pub next: u16,
 }
 
 #[allow(clippy::len_without_is_empty)]
@@ -174,7 +174,7 @@ impl<M: GuestAddressSpace> DescriptorChain<M> {
     }
 
     /// Create a new `DescriptorChain` instance.
-    fn new(mem: M::T, desc_table: GuestAddress, queue_size: u16, head_index: u16) -> Self {
+    pub fn new(mem: M::T, desc_table: GuestAddress, queue_size: u16, head_index: u16) -> Self {
         Self::with_ttl(mem, desc_table, queue_size, queue_size, head_index)
     }
 
@@ -371,10 +371,13 @@ unsafe impl ByteValued for VirtqUsedElem {}
 #[derive(Clone, Default)]
 pub struct QueueConfig {
     /// The maximal size in elements offered by the device
-    max_size: u16,
+    pub max_size: u16,
 
-    next_avail: Wrapping<u16>,
-    next_used: Wrapping<u16>,
+    ///
+    pub next_avail: Wrapping<u16>,
+
+    ///
+    pub next_used: Wrapping<u16>,
 
     /// VIRTIO_F_RING_EVENT_IDX negotiated
     event_idx_enabled: bool,
