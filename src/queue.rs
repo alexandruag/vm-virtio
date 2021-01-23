@@ -514,6 +514,13 @@ impl<M: GuestAddressSpace, C: Borrow<QueueConfig>> Queue<M, C> {
         }
     }
 
+    fn avail_flags(&self, order: Ordering) -> Result<u16, Error> {
+        self.mem
+            .memory()
+            .load(self.config().avail_ring, order)
+            .map_err(Error::GuestMemory)
+    }
+
     /// Reads the `idx` field from the available ring.
     pub fn avail_idx(&self, order: Ordering) -> Result<Wrapping<u16>, Error> {
         let addr = self.config().avail_ring.unchecked_add(2);
@@ -731,7 +738,6 @@ impl<M: GuestAddressSpace, C: BorrowMut<QueueConfig>> Queue<M, C> {
         // Complete all the writes in add_used() before reading the event.
         fence(Ordering::SeqCst);
 
-        // The VRING_AVAIL_F_NO_INTERRUPT flag isn't supported yet.
         if cfg.event_idx_enabled {
             if let Some(old_idx) = cfg.signalled_used.replace(used_idx) {
                 if let Ok(used_event) = self.used_event(Ordering::Relaxed) {
@@ -744,6 +750,10 @@ impl<M: GuestAddressSpace, C: BorrowMut<QueueConfig>> Queue<M, C> {
                         return false;
                     }
                 }
+            }
+        } else {
+            if let Ok(1) = self.avail_flags(Ordering::Relaxed) {
+                return false;
             }
         }
         true
